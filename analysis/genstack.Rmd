@@ -1,0 +1,113 @@
+---
+title: "NEM Historic Data"
+subtitle: ""
+output: 
+  html_document:
+    toc: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, 
+                      cache=FALSE, 
+                      messages=FALSE, 
+                      warning=FALSE)
+#library(tidyverse)
+
+library(here)
+library(plotly)
+library(readxl) # need to read Excel file provided by AEMO
+library(tidyverse)
+
+dispatchcsv <- here("data","dispatch.csv")
+```
+
+
+```{r readzippeddata, include=FALSE, eval=FALSE}
+## This chunk loads and aggregates the data from zip files in .../nem/data/dispatch/*.zip
+## CAUTION: All the contents in directory .../nem/data/temp will be deleted (this is where the files are unzipped)
+
+tempfolder <- here("data","temp")
+daylist <- sort(list.files(here("data","dispatch"), full.names = TRUE))
+dispatchcsv <- here("data","dispatch.csv")
+
+gendf <- read_excel(here("data", "NEM Registration and Exemption List.xls"), sheet = "Generators and Scheduled Loads")
+gendf <- gendf %>%
+  filter(`Dispatch Type`=="Generator") %>%
+  select("DUID", "Region", "Fuel Source - Primary") %>%
+  rename("Type" = "Fuel Source - Primary") %>%
+  distinct(DUID, .keep_all= TRUE) %>%
+  filter(DUID!="-")
+
+df <- data.frame(matrix(ncol=8,nrow=0, dimnames=list(NULL, c("TIME", "FOSSIL_MW", "HYDRO_MW","BIOMASS_MW","SOLAR_MW", "WIND_MW", "BATTERY_MW", "UNKNOWN_MW"))))
+write.table(df, file=dispatchcsv, sep = ",", append=FALSE)
+
+df2 <- data.frame(c("Fossil", "Hydro", "Wind", "Solar", "Battery Storage", "Unknown", "Renewable/ Biomass / Waste"), c(0,0,0,0,0,0,0))
+colnames(df2) <- c("Type", "SCADAVALUE")
+
+for (day in daylist)
+{
+  do.call(file.remove, list(list.files(tempfolder, full.names = TRUE))) # clear temporary folder
+  unzip(day,exdir=tempfolder)
+  timelist <- sort(list.files(tempfolder, full.names = TRUE))
+
+  for (time in timelist)
+  {
+    unzip(time,exdir=tempfolder)
+    df <- read.csv(file = gsub(".zip", ".CSV", time[1]), skip=1, stringsAsFactors=FALSE)
+    df <- head(df, -1) # remove last line
+    merge(df[5:7], gendf, by="DUID", all.x = TRUE) %>%
+      replace_na(list(Type="Unknown")) %>%
+      select(Type, SCADAVALUE) %>%
+      rbind(df2) %>%
+      group_by(Type) %>%
+      summarise(sum = sum(SCADAVALUE)) %>%
+      spread(Type, sum) %>%
+      add_column(Time = as.POSIXct(df$SETTLEMENTDATE[1], format="%Y/%m/%d %H:%M:%S", tz="Australia/Melbourne")) %>%
+      select(Time, Fossil, Hydro, Biomass="Renewable/ Biomass / Waste", Solar, Wind, Battery="Battery storage", Unknown) %>%
+      write.table(file=dispatchcsv, sep = ",", append=TRUE, col.names = FALSE, row.names = FALSE)
+  }
+}
+do.call(file.remove, list(list.files(tempfolder, full.names = TRUE))) # clear temporary folder
+```
+
+
+
+## Dispatch Generator Stack Plot
+
+```{r, out.width='100%', eval=TRUE}
+df <- read.csv(file = dispatchcsv)
+supply <- df$FOSSIL_MW + df$HYDRO_MW + df$BIOMASS_MW + df$WIND_MW + df$SOLAR_MW + df$BATTERY_MW + df$UNKNOWN_MW
+
+p1 <- plot_ly(df, x = ~TIME, y=0, type = 'bar', hoverinfo = 'x', marker = list(color = 'black'), showlegend=F) %>%
+  add_trace(y = ~FOSSIL_MW, name = 'Fossil', hovertext = sprintf("%.2f%%",100*(df$FOSSIL_MW/supply)), hoverinfo = 'text', marker = list(color = 'brown'), showlegend=T) %>%
+  add_trace(y = ~HYDRO_MW, name = 'Hydro', hovertext = sprintf("%.2f%%",100*(df$HYDRO_MW/supply)), hoverinfo = 'text', marker = list(color = 'blue'), showlegend=T) %>%
+  add_trace(y = ~BIOMASS_MW, name = 'Biomass', hovertext = sprintf("%.2f%%",100*(df$BIOMASS_MW/supply)), hoverinfo = 'text', marker = list(color = 'red'), showlegend=T) %>%
+  add_trace(y = ~WIND_MW, name = 'Wind', hovertext = sprintf("%.2f%%",100*(df$WIND_MW/supply)), hoverinfo = 'text', marker = list(color = 'green'), showlegend=T) %>%
+  add_trace(y = ~SOLAR_MW, name = 'Solar', hovertext = sprintf("%.2f%%",100*(df$SOLAR_MW/supply)), hoverinfo = 'text', marker = list(color = 'orange'), showlegend=T) %>%
+  add_trace(y = ~BATTERY_MW, name = 'Battery', hovertext = sprintf("%.2f%%",100*(df$BATTERY_MW/supply)), hoverinfo = 'text', marker = list(color = 'purple'), showlegend=T) %>%
+  add_trace(y = ~UNKNOWN_MW, name = 'Unknown', hovertext = sprintf("%.2f%%",100*(df$UNKNOWN_MW/supply)), hoverinfo = 'text', marker = list(color = 'grey'), showlegend=T) %>%
+  layout(yaxis = list(title = 'Power (MW)'), barmode = 'stack', hovermode='x unified')
+
+p1
+```
+
+source: https://aemo.com.au/en/energy-systems/electricity/national-electricity-market-nem/data-nem/market-management-system-mms-data/dispatch
+
+## Non-synchronous Generation Fraction
+```{r, out.width='100%'}
+df <- read.csv(file = dispatchcsv, stringsAsFactors=FALSE)
+df$TIME <- substr(df$TIME, 12, 13)
+df[df$TIME == "",1] = "00"
+df <- df %>%
+  mutate(IBRPERCENT = 100* (SOLAR_MW+WIND_MW+BATTERY_MW) / (SOLAR_MW+WIND_MW+BATTERY_MW+FOSSIL_MW+HYDRO_MW+BIOMASS_MW+UNKNOWN_MW)) %>%
+  select(TIME, IBRPERCENT) %>%
+  arrange(TIME)
+
+
+p2 <- plot_ly(df, y = ~IBRPERCENT, color = ~TIME, type = "box") %>% 
+  layout(xaxis = list(title = "TIME", zeroline = FALSE), yaxis = list(title = "IBR  (%)", zeroline = FALSE))
+
+p2
+
+```
+
